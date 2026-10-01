@@ -199,6 +199,11 @@ st.markdown(
     }}
     .hsc-chip .lbl {{ display:block; font-size: 0.68rem; color:#333; opacity:0.75; }}
     .hsc-chip .val {{ display:block; font-weight:700; font-size: 0.92rem; }}
+    .hsc-chip.multi {{ background:#fff !important; border-color: rgba(0,0,0,0.12) !important; min-width: 165px; vertical-align: top; }}
+    .hsc-chip.multi .row {{ display:flex; justify-content:space-between; align-items:baseline; gap:8px; margin-top:3px; }}
+    .hsc-chip.multi .tag {{ font-size:0.62rem; color:{GREY}; white-space:nowrap; }}
+    .hsc-chip.multi .row .val {{ display:inline; font-size:0.82rem; }}
+    .hsc-chip.multi .pct {{ display:block; font-size:0.65rem; color:{NAVY}; text-align:right; margin-top:1px; }}
     .hsc-badge {{
         display: inline-block;
         border-radius: 999px;
@@ -539,99 +544,70 @@ else:
             return "0.0%"
         return f"{pct:+.1f}%"
 
-    def render_compare_table(groups, caption, first_label="first results"):
-        """groups: list of {label, date, items} where items is a list of {label,unit,value} metric dicts, all same length/order.
-        The first group is the baseline (value column only). Every subsequent group gets its own value
-        column PLUS its own '% Δ' column measured back to the baseline — so a block with 3+ sub-areas
-        or sampling rounds gets one % Δ column per non-baseline group, not just a single first-to-last column."""
+    def _build_nutrient_groups(rec):
+        """Ordered list of {label, date, items} groups for this block's nutrients: sampling-round
+        history takes priority (two+ temporal rounds for the same physical block), then spatial
+        sub-areas, then just the single latest result."""
+        history = rec.get("nutrient_history") or []
+        if history:
+            rounds = [{"label": h.get("label") or f"Round {i+1}", "date": h.get("date"), "items": h["nutrients"]} for i, h in enumerate(history)]
+            rounds.append({"label": f"Round {len(rounds)+1} (latest)", "date": rec.get("soil_results_date") or rec.get("health_sample_2_date") or rec.get("health_sample_date"), "items": rec.get("nutrients", [])})
+            return rounds
+        areas = rec.get("nutrient_areas") or []
+        if areas:
+            return [{"label": a["area"], "date": a.get("date"), "items": a["nutrients"]} for a in areas]
+        return [{"label": "", "date": None, "items": rec.get("nutrients", [])}]
+
+    def _build_pathogen_groups(rec):
+        areas = rec.get("pathogen_areas") or []
+        if areas and any(any(p["value"] is not None for p in a["pathogens"]) for a in areas):
+            return [{"label": a["area"], "date": a.get("date"), "items": a["pathogens"]} for a in areas]
+        return [{"label": "", "date": None, "items": rec.get("pathogens", [])}]
+
+    def _chip_grid_html(groups):
+        """Renders a metric-grid's worth of chips. A single group renders the classic flat,
+        color-coded chip. Multiple groups (sampling rounds or submit areas) stack each group's
+        value under the one before it, with a '% Δ' line under every value after the first —
+        each measured back to that first (baseline) group's result for this block."""
         if not groups:
-            return
-        n_metrics = len(groups[-1]["items"])
+            return ""
+        if len(groups) == 1:
+            return "".join(
+                f"""<span class="hsc-chip" style="background:{hexc(m['color'])}22; border-color:{hexc(m['color'])};">
+                    <span class="lbl">{m['label']}</span>
+                    <span class="val" style="color:{hexc(m['color'])};">{m['value']}{(' ' + m['unit']) if m.get('unit') else ''}</span>
+                </span>"""
+                for m in groups[0]["items"]
+            )
+        latest_items = groups[-1]["items"]
         first_items = groups[0]["items"]
-
-        # col_plan: ("value", header, group) for every group; ("pct", header, group) for every non-baseline group
-        col_plan = [("value", groups[0]["label"] + (f" ({groups[0]['date']})" if groups[0].get("date") else ""), groups[0])]
-        for g in groups[1:]:
-            header = g["label"] + (f" ({g['date']})" if g.get("date") else "")
-            col_plan.append(("value", header, g))
-            col_plan.append(("pct", f"% Δ ({g['label']})", g))
-
-        value_headers = [h for t, h, _ in col_plan if t == "value"]
-        columns_order = ["Metric"] + [h for _, h, _ in col_plan]
-
-        table_rows = []
-        for idx in range(n_metrics):
-            meta = groups[-1]["items"][idx]
-            row = {"Metric": meta["label"] + (f" ({meta['unit']})" if meta.get("unit") else "")}
+        chips = []
+        for idx, meta in enumerate(latest_items):
             first_val = first_items[idx]["value"] if idx < len(first_items) else None
-            for col_type, header, g in col_plan:
-                items = g["items"]
-                val = items[idx]["value"] if idx < len(items) else None
-                if col_type == "value":
-                    row[header] = "—" if val is None else str(val)
-                else:
-                    row[header] = _pct_change(first_val, val) if len(groups) > 1 else "—"
-            table_rows.append(row)
-        cmp_df = pd.DataFrame(table_rows, columns=columns_order)
+            label_text = meta["label"] + (f" ({meta['unit']})" if meta.get("unit") else "")
+            rows_html = ""
+            for gi, g in enumerate(groups):
+                item = g["items"][idx] if idx < len(g["items"]) else None
+                val = item["value"] if item else None
+                color = hexc(item["color"]) if item and item.get("color") else GREY
+                tag = g["label"] + (f" ({g['date']})" if g.get("date") else "")
+                val_display = "—" if val is None else f"{val}"
+                rows_html += f"""<div class="row"><span class="tag">{tag}</span><span class="val" style="color:{color};">{val_display}</span></div>"""
+                if gi > 0:
+                    rows_html += f"""<div class="pct">% Δ vs {groups[0]['label']}: {_pct_change(first_val, val)}</div>"""
+            chips.append(f"""<span class="hsc-chip multi"><span class="lbl">{label_text}</span>{rows_html}</span>""")
+        return "".join(chips)
 
-        def _highlight_change(row):
-            vals = [row[h] for h in value_headers]
-            present = [v for v in vals if v != "—"]
-            if len(set(present)) > 1:
-                return [""] + [f"background-color: {AMBER}22; font-weight:700;"] * (len(row) - 1)
-            return [""] * len(row)
-
-        st.dataframe(
-            cmp_df.style.apply(_highlight_change, axis=1),
-            use_container_width=True,
-            hide_index=True,
-        )
-        st.caption(f"{caption} Each \"% Δ\" column is measured from the {first_label} for this block.")
-        st.write("")
-
-    history = rec.get("nutrient_history") or []
-    nutrient_areas = rec.get("nutrient_areas") or []
-    pathogen_areas = rec.get("pathogen_areas") or []
+    nutrient_groups = _build_nutrient_groups(rec)
+    pathogen_groups = _build_pathogen_groups(rec)
 
     st.write("")
-    if history:
-        st.markdown("**Nutrients — Sampling Rounds Compared**")
-        rounds = [{"label": h.get("label") or f"Round {i+1}", "date": h.get("date"), "items": h["nutrients"]} for i, h in enumerate(history)]
-        rounds.append({"label": f"Round {len(rounds)+1} (latest)", "date": rec.get("soil_results_date") or rec.get("health_sample_2_date") or rec.get("health_sample_date"), "items": rec.get("nutrients", [])})
-        render_compare_table(rounds, "Highlighted rows changed between sampling rounds.", first_label="first sampling round")
-
-    if nutrient_areas:
-        st.markdown("**Nutrients — By Submit Area**")
-        areas = [{"label": a["area"], "date": a.get("date"), "items": a["nutrients"]} for a in nutrient_areas]
-        render_compare_table(areas, "This block combines multiple sampled sub-areas — highlighted rows differ by area.", first_label="first submit area on file")
-
-    if pathogen_areas and any(any(p["value"] is not None for p in a["pathogens"]) for a in pathogen_areas):
-        st.markdown("**Pathogens — By Submit Area**")
-        p_areas = [{"label": a["area"], "date": a.get("date"), "items": a["pathogens"]} for a in pathogen_areas]
-        render_compare_table(p_areas, "This block combines multiple sampled sub-areas — highlighted rows differ by area.", first_label="first submit area on file")
-
-    nut_title = "**Nutrients (latest)**" if history else ("**Nutrients (combined)**" if nutrient_areas else "**Nutrients**")
-    st.markdown(nut_title)
-    nut_html = "".join(
-        f"""<span class="hsc-chip" style="background:{hexc(n['color'])}22; border-color:{hexc(n['color'])};">
-            <span class="lbl">{n['label']}</span>
-            <span class="val" style="color:{hexc(n['color'])};">{n['value']}{(' ' + n['unit']) if n.get('unit') else ''}</span>
-        </span>"""
-        for n in rec.get("nutrients", [])
-    )
-    st.markdown(nut_html, unsafe_allow_html=True)
+    st.markdown("**Soil Nutrients**")
+    st.markdown(f"<div>{_chip_grid_html(nutrient_groups)}</div>", unsafe_allow_html=True)
 
     st.write("")
-    path_title = "**Pathogens (combined)**" if pathogen_areas else "**Pathogens**"
-    st.markdown(path_title)
-    path_html = "".join(
-        f"""<span class="hsc-chip" style="background:{hexc(p['color'])}22; border-color:{hexc(p['color'])};">
-            <span class="lbl">{p['label']}</span>
-            <span class="val" style="color:{hexc(p['color'])};">{p['value']}{(' ' + p['unit']) if p.get('unit') else ''}</span>
-        </span>"""
-        for p in rec.get("pathogens", [])
-    )
-    st.markdown(path_html, unsafe_allow_html=True)
+    st.markdown("**Pathogens**")
+    st.markdown(f"<div>{_chip_grid_html(pathogen_groups)}</div>", unsafe_allow_html=True)
 
     if rec.get("recommendations"):
         st.write("")
